@@ -6,21 +6,21 @@ on:
       mode:
         description: Run mode
         required: true
-        default: full
+        default: stocks-only
         type: choice
         options:
+          - stocks-only
           - full
           - market-only
-          - stocks-only
       force_run:
         description: Force run (skip trading-day check)
         required: false
-        default: false
+        default: true
         type: boolean
 
-  # Preserve the upstream weekday schedule: 10:00 UTC.
+  # Run after the US regular session closes in both EDT and EST.
   schedule:
-    - cron: '0 10 * * 1-5'
+    - cron: '15 21 * * 1-5'
 
 concurrency:
   group: daily-stock-analysis
@@ -55,7 +55,7 @@ jobs:
           # Core AI configuration
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
           GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK }}
 
           # Optional AI providers / fallbacks
@@ -75,6 +75,7 @@ jobs:
           REPORT_SHOW_LLM_MODEL: ${{ vars.REPORT_SHOW_LLM_MODEL || 'true' }}
           SINGLE_STOCK_NOTIFY: ${{ vars.SINGLE_STOCK_NOTIFY || 'false' }}
           MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || 'true' }}
+          MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || 'us' }}
           TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || 'true' }}
           MAX_WORKERS: ${{ vars.MAX_WORKERS || '1' }}
           LOG_LEVEL: INFO
@@ -99,14 +100,21 @@ jobs:
           echo "=========================================="
           echo "Daily Stock Analysis"
           echo "=========================================="
-          echo "Run mode:        $MODE"
-          echo "Watchlist:       ${STOCK_LIST:-not configured}"
-          echo "Report language: ${REPORT_LANGUAGE:-en}"
-          echo "Gemini API key:  $([ -n \"${GEMINI_API_KEY:-}\" ] && echo 'configured' || echo 'missing')"
+          echo "Run mode:          $MODE"
+          echo "Watchlist:         ${STOCK_LIST:-not configured}"
+          echo "Report language:   ${REPORT_LANGUAGE:-en}"
+          echo "Market review:     ${MARKET_REVIEW_REGION:-us}"
+          echo "Gemini model:      ${GEMINI_MODEL:-not configured}"
+          echo "Gemini API key:    $([ -n \"${GEMINI_API_KEY:-}\" ] && echo 'configured' || echo 'missing')"
           echo "=========================================="
 
           if [ -z "${STOCK_LIST:-}" ]; then
             echo "ERROR: STOCK_LIST is not configured."
+            exit 1
+          fi
+
+          if [ -n "${GEMINI_API_KEY:-}" ] && [ -z "${GEMINI_MODEL:-}" ]; then
+            echo "ERROR: GEMINI_API_KEY is configured but GEMINI_MODEL is empty."
             exit 1
           fi
 
@@ -131,6 +139,27 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Validate analysis output
+        if: success()
+        run: |
+          set -euo pipefail
+
+          if grep -R -E "All LLM models failed|LLM call failed" logs/ >/dev/null 2>&1; then
+            echo "ERROR: DSA completed with an LLM failure."
+            grep -R -E "All LLM models failed|LLM call failed" logs/ | tail -20 || true
+            exit 1
+          fi
+
+          MODE="${{ github.event.inputs.mode || 'full' }}"
+          if [ "$MODE" = "stocks-only" ] || [ "$MODE" = "full" ]; then
+            if ! find reports -maxdepth 1 -type f -name '*.md' -print -quit | grep -q .; then
+              echo "ERROR: stock analysis completed without producing a Markdown report."
+              exit 1
+            fi
+          fi
+
+          echo "Analysis validation passed."
 
       - name: Upload reports and logs
         if: always()
