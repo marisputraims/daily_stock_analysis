@@ -1,0 +1,160 @@
+name: Daily Stock Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Run mode
+        required: true
+        default: stocks-only
+        type: choice
+        options:
+          - stocks-only
+          - full
+          - market-only
+      force_run:
+        description: Force run (skip trading-day check)
+        required: false
+        default: true
+        type: boolean
+
+  # Run after the US regular session has closed in both EDT and EST.
+  schedule:
+    - cron: '15 21 * * 1-5'
+
+concurrency:
+  group: daily-stock-analysis
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    name: Analyze Stocks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create data directories
+        run: mkdir -p data logs reports
+
+      - name: Run stock analysis
+        env:
+          # Core AI configuration
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK }}
+
+          # Optional AI providers / fallbacks
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEYS: ${{ secrets.OPENAI_API_KEYS }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEYS: ${{ secrets.ANTHROPIC_API_KEYS }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_API_KEYS: ${{ secrets.DEEPSEEK_API_KEYS }}
+
+          # Watchlist and report configuration
+          STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST }}
+          REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || 'en' }}
+          REPORT_TYPE: ${{ vars.REPORT_TYPE || 'simple' }}
+          REPORT_SHOW_LLM_MODEL: ${{ vars.REPORT_SHOW_LLM_MODEL || 'true' }}
+          SINGLE_STOCK_NOTIFY: ${{ vars.SINGLE_STOCK_NOTIFY || 'false' }}
+          MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || 'true' }}
+          TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || 'true' }}
+          MAX_WORKERS: ${{ vars.MAX_WORKERS || '1' }}
+          LOG_LEVEL: INFO
+
+          # Optional search / news providers
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+          BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
+          BOCHA_API_KEYS: ${{ secrets.BOCHA_API_KEYS }}
+          SEARXNG_BASE_URLS: ${{ vars.SEARXNG_BASE_URLS || secrets.SEARXNG_BASE_URLS }}
+
+          # Optional market-data providers
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          TICKFLOW_API_KEY: ${{ secrets.TICKFLOW_API_KEY }}
+
+        run: |
+          set -euo pipefail
+
+          MODE="${{ github.event.inputs.mode || 'stocks-only' }}"
+          FORCE_RUN="${{ github.event.inputs.force_run || 'false' }}"
+
+          echo "=========================================="
+          echo "Daily Stock Analysis"
+          echo "=========================================="
+          echo "Run mode:        $MODE"
+          echo "Watchlist:       ${STOCK_LIST:-not configured}"
+          echo "Report language: ${REPORT_LANGUAGE:-en}"
+          echo "Gemini API key:  $([ -n \"${GEMINI_API_KEY:-}\" ] && echo 'configured' || echo 'missing')"
+          echo "=========================================="
+
+          if [ -z "${STOCK_LIST:-}" ]; then
+            echo "ERROR: STOCK_LIST is not configured."
+            exit 1
+          fi
+
+          FORCE_ARG=""
+          if [ "$FORCE_RUN" = "true" ]; then
+            FORCE_ARG="--force-run"
+            echo "Force-run enabled: trading-day check will be skipped."
+          fi
+
+          case "$MODE" in
+            market-only)
+              python main.py --market-review $FORCE_ARG
+              ;;
+            stocks-only)
+              python main.py --no-market-review $FORCE_ARG
+              ;;
+            full)
+              python main.py $FORCE_ARG
+              ;;
+            *)
+              echo "ERROR: unsupported run mode: $MODE"
+              exit 1
+              ;;
+          esac
+
+      - name: Upload reports and logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: stock-analysis-${{ github.run_number }}
+          path: |
+            reports/
+            logs/
+          retention-days: 30
+
+      - name: Show run summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "Stock analysis run finished"
+          echo "=========================================="
+          if [ -d reports ] && [ "$(ls -A reports 2>/dev/null)" ]; then
+            echo "Generated reports:"
+            ls -lah reports/
+          else
+            echo "No report files were generated."
+          fi
+
+          echo ""
+          echo "Recent log output:"
+          tail -30 logs/stock_analysis_*.log 2>/dev/null || echo "No log file found."
