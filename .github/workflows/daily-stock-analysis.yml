@@ -6,21 +6,21 @@ on:
       mode:
         description: Run mode
         required: true
-        default: stocks-only
+        default: full
         type: choice
         options:
-          - stocks-only
           - full
           - market-only
+          - stocks-only
       force_run:
         description: Force run (skip trading-day check)
         required: false
-        default: true
+        default: false
         type: boolean
 
-  # Run after the US regular session has closed in both EDT and EST.
+  # Preserve the upstream weekday schedule: 10:00 UTC.
   schedule:
-    - cron: '15 21 * * 1-5'
+    - cron: '0 10 * * 1-5'
 
 concurrency:
   group: daily-stock-analysis
@@ -93,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          MODE="${{ github.event.inputs.mode || 'stocks-only' }}"
+          MODE="${{ github.event.inputs.mode || 'full' }}"
           FORCE_RUN="${{ github.event.inputs.force_run || 'false' }}"
 
           echo "=========================================="
